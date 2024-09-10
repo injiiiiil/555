@@ -648,3 +648,10 @@ void AP_MotorsHeli::heli_motors_param_conversions(void)
         AP_Param::convert_old_parameter(&rsc_arot_conversion_info[i], 1.0);
     }
 }
+
+// function to calculate the normalised collective position given a desired blade pitch angle (deg)
+float AP_MotorsHeli::calc_coll_from_ang(float col_ang_deg) const
+{
+    float col_norm = col_ang_deg / MAX((_collective_max_deg.get() - _collective_min_deg.get()), 1.0);
+    return constrain_float(col_norm, 0.0, 1.0);
+}
