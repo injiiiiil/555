@@ -100,6 +100,8 @@ void ModeAutorotate::run()
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
     }
 
+    // Get pilot's desired yaw rate
+    float pilot_lateral_norm_accel = channel_yaw->norm_input_dz();
 
     //----------------------------------------------------------------
     //                  State machine actions
@@ -113,7 +115,7 @@ void ModeAutorotate::run()
                 g2.arot.init_entry();
                 _flags.entry_init = true;
             }
-            g2.arot.run_entry(_pitch_target);
+            g2.arot.run_entry(pilot_lateral_norm_accel);
             break;
         }
 
@@ -124,7 +126,7 @@ void ModeAutorotate::run()
                 g2.arot.init_glide();
                 _flags.glide_init = true;
             }
-            g2.arot.run_glide(_pitch_target);
+            g2.arot.run_glide(pilot_lateral_norm_accel);
             break;
         }
 
@@ -141,24 +143,10 @@ void ModeAutorotate::run()
                 _flags.landed_init = true;
             }
             // don't allow controller to continually ask for more pitch to build speed when we are on the ground, decay to zero smoothly
-            _pitch_target *= 0.95;
+            g2.arot.run_landed();
             break;
         }
     }
-
-    //----------------------------------------------------------------
-    //                 Attitude/Navigation Control
-    //----------------------------------------------------------------
-    // Operator is in control of roll and yaw.  Controls act as if in stabilise flight mode.  Pitch 
-    // is controlled by speed-height controller.
-    float pilot_roll, pilot_pitch;
-    get_pilot_desired_lean_angles(pilot_roll, pilot_pitch, copter.aparm.angle_max, copter.aparm.angle_max);
-
-    // Get pilot's desired yaw rate
-    float pilot_yaw_rate = get_pilot_desired_yaw_rate();
-
-    // Pitch target is calculated in autorotation phase switch above
-    attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw(pilot_roll, _pitch_target*100.0, pilot_yaw_rate);
 
 } // End function run()
 
