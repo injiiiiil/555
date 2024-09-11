@@ -67,14 +67,14 @@ const AP_Param::GroupInfo AC_Autorotation::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("COL_FILT_G", 6, AC_Autorotation, _param_col_glide_cutoff_freq, 0.1),
 
-    // @Param: AS_ACC_MAX
+    // @Param: FW_ACC_MAX
     // @DisplayName: Forward Acceleration Limit
     // @Description: Maximum forward acceleration to apply in speed controller.
     // @Units: m/s/s
     // @Range: 0.3 2.0
     // @Increment: 0.1
     // @User: Standard
-    AP_GROUPINFO("AS_ACC_MAX", 7, AC_Autorotation, _param_accel_max, 0.6),
+    AP_GROUPINFO("FW_ACC_MAX", 7, AC_Autorotation, _param_accel_max, 1.4),
 
     // @Param: HS_SENSOR
     // @DisplayName: Main Rotor RPM Sensor 
@@ -101,18 +101,29 @@ const AP_Param::GroupInfo AC_Autorotation::var_info[] = {
     // @User: Standard
     AP_GROUPINFO("FW_V_FF", 10, AC_Autorotation, _param_fwd_k_ff, 1.5),
 
+    // @Param: FW_JERK_MAX
+    // @DisplayName: Forward jerk limit
+    // @Description: Maximum forward jerk to apply in speed controller.
+    // @Units: m/s/s/s
+    // @Range: 0.1 4.0
+    // @Increment: 0.01
+    // @User: Standard
+    AP_GROUPINFO("FW_JERK_MAX", 11, AC_Autorotation, _param_jerk_max, 0.46),
+
     AP_GROUPEND
 };
 
 // Constructor
-AC_Autorotation::AC_Autorotation(AP_AHRS& ahrs, AP_MotorsHeli*& motors, AC_PosControl*& pos_ctrl) :
+AC_Autorotation::AC_Autorotation(AP_AHRS& ahrs, AP_MotorsHeli*& motors, AC_PosControl*& pos_ctrl, AC_AttitudeControl*& att_crtl) :
     _ahrs(ahrs),
     _motors_heli(motors),
     _pos_control(pos_ctrl),
+    _attitude_control(att_crtl),
     _p_hs(HS_CONTROLLER_HEADSPEED_P),
     _p_fw_vel(AP_FW_VEL_P)
     {
         AP_Param::setup_object_defaults(this, var_info);
+        _desired_heading.heading_mode = AC_AttitudeControl::HeadingMode::Rate_Only;
     }
 
 void AC_Autorotation::init(void) {
@@ -126,13 +137,14 @@ void AC_Autorotation::init(void) {
     // Protect against divide by zero
     _param_head_speed_set_point.set(MAX(_param_head_speed_set_point, 500.0));
 
-    // Initialise forward speed controller
-    _accel_target = 0.0;
+    // Set limits and initialise xy pos controller
+    _pos_control->set_max_speed_accel_xy(_param_target_speed.get()*100.0, _param_accel_max.get()*100.0);
+    _pos_control->set_correction_speed_accel_xy(_param_target_speed.get()*100.0, _param_accel_max.get()*100.0);
+    _pos_control->set_pos_error_max_xy_cm(1000);
+    _pos_control->init_xy_controller();
 
-    // Reset cmd vel and last accel to sensible values
-    _cmd_vel = get_speed_forward();
-    _accel_out_last = _cmd_vel * _param_fwd_k_ff;
-
+    // Init to current heading
+    _yaw_rate = _ahrs.get_yaw_rate_earth();
 }
 
 // Functions and config that are only to be done once at the beginning of the entry
@@ -141,7 +153,7 @@ void AC_Autorotation::init_entry(void)
     gcs().send_text(MAV_SEVERITY_INFO, "Entry Phase");
 
     // Set desired forward speed target
-    _vel_target = _param_target_speed.get();
+    _fwd_spd_desired = _param_target_speed.get();
 
     // Target head speed is set to rpm at initiation to prevent steps in controller
     _target_head_speed = get_norm_head_speed();
@@ -157,7 +169,7 @@ void AC_Autorotation::init_entry(void)
 }
 
 // The entry controller just a special case of the glide controller with head speed target slewing
-void AC_Autorotation::run_entry(float& pitch_target)
+void AC_Autorotation::run_entry(float pilot_norm_accel)
 {
     // Slowly change the target head speed until the target head speed matches the parameter defined value
     float norm_rpm = get_norm_head_speed();
@@ -168,7 +180,7 @@ void AC_Autorotation::run_entry(float& pitch_target)
         _target_head_speed = HEAD_SPEED_TARGET_RATIO;
     }
 
-    run_glide(pitch_target);
+    run_glide(pilot_norm_accel);
 }
 
 // Functions and config that are only to be done once at the beginning of the glide
@@ -183,15 +195,46 @@ void AC_Autorotation::init_glide(void)
     _target_head_speed = HEAD_SPEED_TARGET_RATIO;
 
     // Ensure desired forward speed target is set to param value
-    _vel_target = _param_target_speed.get();
+    _fwd_spd_desired = _param_target_speed.get();
 }
 
 // Maintain head speed and forward speed as we glide to the ground
-void AC_Autorotation::run_glide(float& pitch_target)
+void AC_Autorotation::run_glide(float pilot_norm_accel)
 {
     update_headspeed_controller();
 
-    update_forward_speed_controller(pitch_target);
+    // Set body frame velocity targets
+    desired_velocity_bf.x = _fwd_spd_desired;
+    desired_velocity_bf.y = 0.0; // Always want zero side slip
+
+    // Set body frame accel targets. Pilot requests lateral accel.
+    desired_accel_bf.y = desired_accel_bf.y * 0.975 + pilot_norm_accel * _param_accel_max.get() * 0.025; // approx 10 hz low-pass filter
+    desired_accel_bf.x = 0.0; // Do not use forward accel feed-forward
+
+    // Based on the requested lateral accel, calc the necessary yaw rate to achieve a coordinated turn
+    const float curr_fwd_speed = get_speed_forward();
+    const float delta_v = MIN((_fwd_spd_desired - curr_fwd_speed), (_param_accel_max.get() * _dt));
+    const float projected_vel = curr_fwd_speed + delta_v; // predicted velocity in the next time step
+
+    // Calc yaw rate from desired body-frame accels
+    // this seems suspiciously simple, but it is correct
+    // accel = r * w^2
+    // radius can be calculated as the distance traveled in the time it take to do 360 deg
+    // One rotation takes: (2*pi)/w  seconds
+    // Distance traveled in that time: (s*2*pi)/w
+    // radius for that distance: ((s*2*pi)/w) / (2*pi)
+    // r = s / w
+    // accel = (s / w) * w^2
+    // accel = s * w
+    // w = accel / s
+    const float yaw_rate = desired_accel_bf.y / projected_vel;
+
+    // Smoothly update desired yaw rate
+    _yaw_rate = _yaw_rate * 0.975 + yaw_rate * 0.025; // approx 10 hz low-pass filter
+    _desired_heading.yaw_rate_cds = degrees(_yaw_rate)*100.0;
+
+    // Update the position controller
+    update_xy_speed_controller();
 }
 
 void AC_Autorotation::update_headspeed_controller(void)
@@ -250,6 +293,57 @@ float AC_Autorotation::get_norm_head_speed(void) const
     return current_rpm/head_speed_set_point;
 }
 
+// Update speed controller
+// Vehicle is trying to achieve and maintain the desired speed in the body-frame forward direction.
+// During the entry and glide phases the pilot can navigate via a yaw rate input and coordinated roll is calculated.
+void AC_Autorotation::update_xy_speed_controller(void)
+{
+    // Convert from body-frame to earth-frame
+    desired_velocity_ef = _ahrs.body_to_earth2D(desired_velocity_bf) * 100.0;
+    desired_accel_ef = _ahrs.body_to_earth2D(desired_accel_bf) * 100.0;
+
+    // Update the position controller
+    _pos_control->input_vel_accel_xy(desired_velocity_ef, desired_accel_ef, true);
+    _pos_control->update_xy_controller();
+
+    // Output to the attitude controller
+    _attitude_control->input_thrust_vector_heading(_pos_control->get_thrust_vector(), _desired_heading);
+}
+
+// smoothly zero velocity and accel
+void AC_Autorotation::run_landed(void)
+{
+    desired_velocity_bf.x *= 0.95;
+    desired_velocity_bf.y *= 0.95;
+    desired_accel_bf.x *= 0.95;
+    desired_accel_bf.y *= 0.95;
+    update_xy_speed_controller();
+    _pos_control->soften_for_landing_xy();
+}
+
+// Determine the forward ground speed component from measured components
+float AC_Autorotation::get_speed_forward(void) const
+{
+    Vector2f groundspeed_vector = _ahrs.groundspeed_vector();
+    return groundspeed_vector.x*_ahrs.cos_yaw() + groundspeed_vector.y*_ahrs.sin_yaw(); // (m/s)
+}
+
+Vector3f AC_Autorotation::get_bf_accel(void) const
+{
+    Vector3f ef_accel = _ahrs.get_accel_ef();
+    return _ahrs.earth_to_body(ef_accel);
+}
+
+Vector3f AC_Autorotation::get_bf_vel(void) const
+{
+    Vector3f ef_vel;
+    if (_ahrs.get_velocity_NED(ef_vel)) {
+        return _ahrs.earth_to_body(ef_vel);
+    }
+    // TODO: probably need to think of some smart handing case for returning false on this method
+    return ef_vel;
+}
+
 
 #if HAL_LOGGING_ENABLED
 void AC_Autorotation::log_write_autorotation(void) const
@@ -263,7 +357,7 @@ void AC_Autorotation::log_write_autorotation(void) const
 // @Field: ColOut: Collective Out
 // @Field: FFCol: FF-term for headspeed controller response
 // @Field: SpdF: current forward speed
-// @Field: CmdV: desired forward speed
+// @Field: DFS: desired forward speed
 // @Field: p: p-term of velocity response
 // @Field: ff: ff-term of velocity response
 // @Field: AccT: forward acceleration target
@@ -280,80 +374,42 @@ void AC_Autorotation::log_write_autorotation(void) const
                         _collective_out,
                         _ff_term_hs,
                         get_speed_forward(),
-                        _cmd_vel,
+                        _fwd_spd_desired,
                         _vel_p,
                         _vel_ff,
                         _accel_target,
                         _landed_reason);
+
+
+    // @LoggerMessage: ARO2
+    // @Vehicles: Copter
+    // @Description: Helicopter Autorotation information 2
+    // @Field: TimeUS: Time since system startup
+    // @Field: VXB: Desired velocity X in body frame
+    // @Field: VYB: Desired velocity Y in body frame
+    // @Field: AXB: Desired Acceleration X in body frame
+    // @Field: AYB: Desired Acceleration Y in body frame
+    // @Field: VXE: Desired velocity X in earth frame
+    // @Field: VYE: Desired velocity Y in earth frame
+    // @Field: AXE: Desired Acceleration X in earth frame
+    // @Field: AYE: Desired Acceleration Y in earth frame
+
+    //Write to data flash log
+    AP::logger().WriteStreaming("ARO2",
+                       "TimeUS,VXB,VYB,AXB,AYB,VXE,VYE,AXE,AYE,dt",
+                        "Qfffffffff",
+                        AP_HAL::micros64(),
+                        desired_velocity_bf.x,
+                        desired_velocity_bf.y,
+                        desired_accel_bf.x,
+                        desired_accel_bf.y,
+                        desired_velocity_ef.x,
+                        desired_velocity_ef.y,
+                        desired_accel_ef.x,
+                        desired_accel_ef.y,
+                        _dt);
 }
 #endif  // HAL_LOGGING_ENABLED
-
-// Update speed controller
-void AC_Autorotation::update_forward_speed_controller(float& pitch_target)
-{
-    const float speed_forward = get_speed_forward();
-
-    // Limiting the target velocity based on the max acceleration limit
-    if (_cmd_vel < _vel_target) {
-        _cmd_vel += accel_max() * _dt;
-        if (_cmd_vel > _vel_target) {
-            _cmd_vel = _vel_target;
-        }
-    } else {
-        _cmd_vel -= accel_max() * _dt;
-        if (_cmd_vel < _vel_target) {
-            _cmd_vel = _vel_target;
-        }
-    }
-
-    // Get p
-    _vel_p = _p_fw_vel.get_p(_cmd_vel - speed_forward);
-
-    // Get ff
-    _vel_ff = _cmd_vel*_param_fwd_k_ff;
-
-    // Calculate acceleration target based on PI controller
-    _accel_target = _vel_ff + _vel_p;
-
-    // Filter correction acceleration
-    _accel_target_filter.set_cutoff_frequency(10.0f);
-    _accel_target_filter.apply(_accel_target, _dt);
-
-    // Limits the maximum change in pitch attitude based on acceleration
-    if (_accel_target > _accel_out_last + accel_max()) {
-        _accel_target = _accel_out_last + accel_max();
-    } else if (_accel_target < _accel_out_last - accel_max()) {
-        _accel_target = _accel_out_last - accel_max();
-    }
-
-    // Limiting acceleration based on velocity gained during the previous time step
-    const float delta_speed = speed_forward - _speed_forward_last;
-    _speed_forward_last = speed_forward;
-    if (fabsf(delta_speed) > accel_max() * _dt) {
-        _flag_limit_accel = true;
-    } else {
-        _flag_limit_accel = false;
-    }
-
-    if ((_flag_limit_accel && fabsf(_accel_target) < fabsf(_accel_out_last)) || !_flag_limit_accel) {
-        _accel_out = _accel_target;
-    } else {
-        _accel_out = _accel_out_last;
-    }
-    _accel_out_last = _accel_out;
-
-    // Update angle targets that will be passed to stabilize controller
-    pitch_target = accel_to_angle(-_accel_out);
-}
-
-
-// Determine the forward ground speed component from measured components
-float AC_Autorotation::get_speed_forward(void) const
-{
-    auto &ahrs = AP::ahrs();
-    Vector2f groundspeed_vector = ahrs.groundspeed_vector();
-    return groundspeed_vector.x*ahrs.cos_yaw() + groundspeed_vector.y*ahrs.sin_yaw(); // (m/s)
-}
 
 // Arming checks for autorotation, mostly checking for miss-configurations
 bool AC_Autorotation::arming_checks(size_t buflen, char *buffer) const
@@ -389,7 +445,7 @@ bool AC_Autorotation::arming_checks(size_t buflen, char *buffer) const
 #endif
 
     // Check that heli motors is configured for autorotation
-    if (!_motors_heli->rsc_arot_enabled()) {
+    if (!_motors_heli->rsc_autorotation_enabled()) {
         hal.util->snprintf(buffer, buflen, "H_RSC_AROT_* not configured");
         return false;
     }
