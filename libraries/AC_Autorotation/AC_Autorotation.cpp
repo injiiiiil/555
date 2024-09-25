@@ -334,28 +334,13 @@ void AC_Autorotation::log_write_autorotation(void) const
 
     // @LoggerMessage: AROT
     // @Vehicles: Copter
-    // @Description: Helicopter Autorotation information
+    // @Description: Helicopter autorotation information 
     // @Field: TimeUS: Time since system startup
     // @Field: P: P-term for head speed controller response
     // @Field: hserr: head speed error; difference between current and desired head speed
     // @Field: FFCol: FF-term for head speed controller response
     // @Field: LR: Landed Reason state flags
     // @FieldBitmaskEnum: LR: AC_Autorotation::AC_Autorotation_Landed_Reason
-
-    //Write to data flash log
-    AP::logger().WriteStreaming("AROT",
-                       "TimeUS,P,hserr,FFCol,LR",
-                        "QfffB",
-                        AP_HAL::micros64(),
-                        _p_term_hs,
-                        _head_speed_error,
-                        _ff_term_hs,
-                        _landed_reason);
-
-    // @LoggerMessage: ARO2
-    // @Vehicles: Copter
-    // @Description: Helicopter Autorotation information 2
-    // @Field: TimeUS: Time since system startup
     // @Field: VXB: Desired velocity X in body frame
     // @Field: VYB: Desired velocity Y in body frame
     // @Field: AXB: Desired Acceleration X in body frame
@@ -365,11 +350,15 @@ void AC_Autorotation::log_write_autorotation(void) const
     // @Field: AXE: Desired Acceleration X in earth frame
     // @Field: AYE: Desired Acceleration Y in earth frame
 
-    //Write to data flash log
+    // Write to data flash log
     AP::logger().WriteStreaming("ARO2",
-                       "TimeUS,VXB,VYB,AXB,AYB,VXE,VYE,AXE,AYE",
-                        "Qffffffff",
+                       "TimeUS,P,hserr,FFCol,LR,VXB,VYB,AXB,AYB,VXE,VYE,AXE,AYE",
+                        "QfffBffffffff",
                         AP_HAL::micros64(),
+                        _p_term_hs,
+                        _head_speed_error,
+                        _ff_term_hs,
+                        _landed_reason,
                         _desired_velocity_bf.x,
                         _desired_velocity_bf.y,
                         _desired_accel_bf.get().x,
