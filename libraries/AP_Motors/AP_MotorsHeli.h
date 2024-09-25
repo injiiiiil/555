@@ -136,8 +136,8 @@ public:
     // set land complete flag
     void set_land_complete(bool landed) { _heliflags.land_complete = landed; }
 
-    // function to calculate the normalised collective position given a desired blade pitch angle (deg)
-    float calc_coll_from_ang(float col_ang_deg) const;
+    // function to calculate and set the normalised collective position given a desired blade pitch angle (deg)
+    void set_coll_from_ang(float col_ang_deg);
 
     //return zero lift collective position
     float get_coll_mid() const { return _collective_zero_thrust_pct; }

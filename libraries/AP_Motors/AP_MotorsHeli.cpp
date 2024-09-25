@@ -649,9 +649,9 @@ void AP_MotorsHeli::heli_motors_param_conversions(void)
     }
 }
 
-// function to calculate the normalised collective position given a desired blade pitch angle (deg)
-float AP_MotorsHeli::calc_coll_from_ang(float col_ang_deg) const
+// function to calculate and set the normalised collective position given a desired blade pitch angle (deg)
+void AP_MotorsHeli::set_coll_from_ang(float col_ang_deg)
 {
-    float col_norm = col_ang_deg / MAX((_collective_max_deg.get() - _collective_min_deg.get()), 1.0);
-    return constrain_float(col_norm, 0.0, 1.0);
+    const float col_norm = (col_ang_deg - _collective_min_deg.get()) / MAX((_collective_max_deg.get() - _collective_min_deg.get()), 1.0);
+    set_throttle(constrain_float(col_norm, 0.0, 1.0));
 }
