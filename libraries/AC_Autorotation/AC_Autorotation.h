@@ -52,7 +52,7 @@ public:
     void set_dt(float delta_sec) { _dt = delta_sec; }
 
     // Helper to get measured head speed that has been normalised by head speed set point
-    float get_norm_head_speed(void) const;
+    bool get_norm_head_speed(float& norm_rpm) const;
 
     // User Settable Parameters
     static const struct AP_Param::GroupInfo var_info[];

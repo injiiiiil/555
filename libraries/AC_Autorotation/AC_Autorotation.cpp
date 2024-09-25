@@ -8,8 +8,8 @@
 // Head Speed (HS) controller specific default definitions
 #define HS_CONTROLLER_COLLECTIVE_CUTOFF_FREQ          2.0     // low-pass filter on accel error (unit: hz)
 #define HS_CONTROLLER_HEADSPEED_P                     0.7     // Default P gain for head speed controller (unit: -)
-#define HEAD_SPEED_TARGET_RATIO                       1.0    // Normalised target main rotor head speed
-
+#define HEAD_SPEED_TARGET_RATIO                       1.0     // Normalised target main rotor head speed
+#define AUTOROTATION_RPM_FAILOVER_COLLECTIVE_ANGLE    2.0     // The collective angle that the head speed controller will default to if the RPM sensor fails (unit: deg)
 
 const AP_Param::GroupInfo AC_Autorotation::var_info[] = {
 
@@ -135,7 +135,10 @@ void AC_Autorotation::init_entry(void)
     _fwd_spd_desired = _param_target_speed.get();
 
     // Target head speed is set to rpm at initiation to prevent steps in controller
-    _target_head_speed = get_norm_head_speed();
+    if (!get_norm_head_speed(_target_head_speed)) {
+        // Cannot get a valid RPM sensor reading so we default to not slewing the head speed target
+        _target_head_speed = HEAD_SPEED_TARGET_RATIO;
+    }
 
     // The decay rate to reduce the head speed from the current to the target
     _hs_decay = (_target_head_speed - HEAD_SPEED_TARGET_RATIO) / (float(entry_time_ms)*1e-3);
@@ -143,7 +146,7 @@ void AC_Autorotation::init_entry(void)
     // Set collective following trim low pass filter cut off frequency
     col_trim_lpf.set_cutoff_frequency(_param_col_entry_cutoff_freq.get());
 
-    // set collective 
+    // Set collective low-pass cut off filter
     _motors_heli->set_throttle_filter_cutoff(HS_CONTROLLER_COLLECTIVE_CUTOFF_FREQ);
 }
 
@@ -151,8 +154,14 @@ void AC_Autorotation::init_entry(void)
 void AC_Autorotation::run_entry(float pilot_norm_accel)
 {
     // Slowly change the target head speed until the target head speed matches the parameter defined value
-    float norm_rpm = get_norm_head_speed();
-    if (norm_rpm > HEAD_SPEED_TARGET_RATIO*1.05f  ||  norm_rpm < HEAD_SPEED_TARGET_RATIO*0.95f) {
+    float head_speed_norm;
+    if (!get_norm_head_speed(head_speed_norm)) {
+        // RPM sensor is bad, so we don't attempt to slew the head speed target as we do not know what head speed actually is
+        // The collective output handling of the rpm sensor failure is handled later in the head speed controller 
+         head_speed_norm = HEAD_SPEED_TARGET_RATIO;
+    }
+
+    if (head_speed_norm > HEAD_SPEED_TARGET_RATIO*1.05f  ||  head_speed_norm < HEAD_SPEED_TARGET_RATIO*0.95f) {
         // Outside of 5% of target head speed so we slew target towards the set point
         _target_head_speed -= _hs_decay * _dt;
     } else {
@@ -170,7 +179,7 @@ void AC_Autorotation::init_glide(void)
     // Set collective following trim low pass filter cut off frequency
     col_trim_lpf.set_cutoff_frequency(_param_col_glide_cutoff_freq.get());
 
-    // Ensure target headspeed is set to setpoint, in case it didn't reach the target during entry
+    // Ensure target head speed is set to setpoint, in case it didn't reach the target during entry
     _target_head_speed = HEAD_SPEED_TARGET_RATIO;
 
     // Ensure desired forward speed target is set to param value
@@ -215,9 +224,8 @@ void AC_Autorotation::run_glide(float pilot_norm_input)
 void AC_Autorotation::update_headspeed_controller(void)
 {
     // Get current rpm and update healthy signal counters
-    const float head_speed_norm = get_norm_head_speed();
-
-    if (!is_positive(head_speed_norm)){
+    float head_speed_norm;
+    if (!get_norm_head_speed(head_speed_norm)) {
         // RPM sensor is bad, set collective to angle of -2 deg and hope for the best
          _motors_heli->set_coll_from_ang(-2.0);
          return;
@@ -240,24 +248,24 @@ void AC_Autorotation::update_headspeed_controller(void)
 }
 
 
-// Helper to get measured head speed that has been normalised by head speed set point
-float AC_Autorotation::get_norm_head_speed(void) const
+// Get measured head speed and normalise by head speed set point. Returns false if a valid rpm measurement cannot be obtained
+bool AC_Autorotation::get_norm_head_speed(float& norm_rpm) const
 {
-    // assuming zero rpm is safer as it will drive collective in the direction of increasing head speed
+    // Assuming zero rpm is safer as it will drive collective in the direction of increasing head speed
     float current_rpm = 0.0;
 
 #if AP_RPM_ENABLED
     // Get singleton for RPM library
     const AP_RPM *rpm = AP_RPM::get_singleton();
 
-    // checking to ensure no nullptr, we do have a pre-arm check for this so it will be very bad if RPM has gone away
+    // Checking to ensure no nullptr, we do have a pre-arm check for this so it will be very bad if RPM has gone away
     if (rpm == nullptr) {
-        return 0.0;
+        return false;
     }
 
     // Check RPM sensor is returning a healthy status
     if (!rpm->get_rpm(_param_rpm_instance.get(), current_rpm)) {
-        return 0.0;
+        return false;
     }
 #endif
 
@@ -265,7 +273,8 @@ float AC_Autorotation::get_norm_head_speed(void) const
     float head_speed_set_point = MAX(1.0, _param_head_speed_set_point.get());
 
     // Normalize the RPM by the setpoint
-    return current_rpm/head_speed_set_point;
+    norm_rpm = current_rpm/head_speed_set_point;
+    return true;
 }
 
 // Update speed controller
@@ -333,9 +342,9 @@ void AC_Autorotation::log_write_autorotation(void) const
     // @Vehicles: Copter
     // @Description: Helicopter Autorotation information
     // @Field: TimeUS: Time since system startup
-    // @Field: P: P-term for headspeed controller response
+    // @Field: P: P-term for head speed controller response
     // @Field: hserr: head speed error; difference between current and desired head speed
-    // @Field: FFCol: FF-term for headspeed controller response
+    // @Field: FFCol: FF-term for head speed controller response
     // @Field: SpdF: current forward speed
     // @Field: LR: Landed Reason state flags
     // @FieldBitmaskEnum: LR: AC_Autorotation::AC_Autorotation_Landed_Reason
