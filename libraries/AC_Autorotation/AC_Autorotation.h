@@ -44,11 +44,11 @@ public:
 
     // Logging of autorotation specific variables
     void log_write_autorotation(void) const;
-    void log_reason(uint8_t reason) { _landed_reason = reason; }
+
+    // return true if we have met the autorotation specific reasons to think we have landed
+    bool check_landed(void);
 
     // Helper functions
-    float accel_max(void) { return MAX(_param_accel_max.get(), 0.1); }
-    float jerk_max(void) { return MAX(_param_jerk_max.get(), 0.1); }
     void set_dt(float delta_sec) { _dt = delta_sec; }
 
     // Helper to get measured head speed that has been normalised by head speed set point
@@ -64,20 +64,18 @@ private:
     // Calculates the forward ground speed in the horizontal plane
     float get_speed_forward(void) const;
 
-    Vector3f get_bf_vel(void) const;
-    Vector3f get_bf_accel(void) const;
+    // get measured accel from the EKF and convert it to body frame XY
+    Vector2f get_bf_accel(void) const;
 
     float _hs_decay;                 // The head speed target acceleration during the entry phase
     float _dt;                       // Time step.
 
-    uint8_t _landed_reason;          // Bitmask of the reasons we think we have landed. Stored in lib for logging.
-
     AC_AttitudeControl::HeadingCommand _desired_heading;
 
-    Vector2f desired_accel_bf;
-    Vector2f desired_velocity_bf;
-    Vector2f desired_velocity_ef;
-    Vector2f desired_accel_ef;
+    LowPassFilterConstDtVector2f _desired_accel_bf;
+    Vector2f _desired_velocity_bf;
+    Vector2f _desired_accel_ef;
+    Vector2f _desired_velocity_ef;
 
     float _yaw_rate;
 
@@ -103,18 +101,22 @@ private:
 
     LowPassFilterFloat _accel_target_filter; // acceleration target filter
 
+    // flags used to check if we believe the aircraft has landed
+    struct {
+        bool min_speed;
+        bool land_col;
+        bool is_still;
+    } _landed_reason;
+
     //--------Parameter Values--------
     AP_Int8  _param_enable;
     AC_P _p_hs;
-    AC_P _p_fw_vel;
     AP_Float _param_head_speed_set_point;
     AP_Float _param_target_speed;
     AP_Float _param_col_entry_cutoff_freq;
     AP_Float _param_col_glide_cutoff_freq;
     AP_Float _param_accel_max;
     AP_Int8  _param_rpm_instance;
-    AP_Float _param_fwd_k_ff;
-    AP_Float _param_jerk_max;
 
     // low pass filter for collective trim
     LowPassFilterFloat col_trim_lpf;
