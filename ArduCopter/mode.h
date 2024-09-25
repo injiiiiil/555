@@ -1985,11 +1985,5 @@ private:
             bool landed_init           : 1;
     } _flags;
 
-    enum class Landed_Reason : uint8_t {
-        LOW_SPEED = 1<<0,
-        LAND_COL  = 1<<1,
-        IS_STILL  = 1<<2,
-    };
-
 };
 #endif

@@ -11,9 +11,6 @@
 
 #if MODE_AUTOROTATE_ENABLED
 
-#define HEAD_SPEED_TARGET_RATIO        1.0    // Normalised target main rotor head speed (unit: -)
-#define AUTOROTATION_MIN_MOVING_SPEED  1.0    // (m/s) minimum speed used for "is moving" check
-
 bool ModeAutorotate::init(bool ignore_checks)
 {
 #if FRAME_CONFIG != HELI_FRAME
@@ -77,21 +74,7 @@ void ModeAutorotate::run()
 
     // Check if we believe we have landed. We need the landed state to zero all
     // controls and make sure that the copter landing detector will trip
-    uint8_t landed_reason = 0;
-    Vector3f velocity;
-    if (ahrs.get_velocity_NED(velocity) && velocity.length() < AUTOROTATION_MIN_MOVING_SPEED) {
-        landed_reason |= uint8_t(Landed_Reason::LOW_SPEED);
-    }
-    if (motors->get_below_land_min_coll()) {
-        landed_reason |= uint8_t(Landed_Reason::LAND_COL);
-    }
-    if (AP::ins().is_still()) {
-        landed_reason |= uint8_t(Landed_Reason::IS_STILL);
-    }
-    // Add to AROT log
-    g2.arot.log_reason(landed_reason);
-    // If all conditions tripped then we can progress to landed phase
-    if (landed_reason == (uint8_t(Landed_Reason::LOW_SPEED) | uint8_t(Landed_Reason::LAND_COL) | uint8_t(Landed_Reason::IS_STILL))) {
+    if (g2.arot.check_landed()) {
         phase_switch = Autorotation_Phase::LANDED;
     }
 
@@ -100,8 +83,8 @@ void ModeAutorotate::run()
         motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
     }
 
-    // Get pilot's desired yaw rate
-    float pilot_lateral_norm_accel = channel_yaw->norm_input_dz();
+    // Get norm input from yaw channel
+    const float pilot_norm_input = channel_yaw->norm_input_dz();
 
     //----------------------------------------------------------------
     //                  State machine actions
@@ -115,7 +98,7 @@ void ModeAutorotate::run()
                 g2.arot.init_entry();
                 _flags.entry_init = true;
             }
-            g2.arot.run_entry(pilot_lateral_norm_accel);
+            g2.arot.run_entry(pilot_norm_input);
             break;
         }
 
@@ -126,7 +109,7 @@ void ModeAutorotate::run()
                 g2.arot.init_glide();
                 _flags.glide_init = true;
             }
-            g2.arot.run_glide(pilot_lateral_norm_accel);
+            g2.arot.run_glide(pilot_norm_input);
             break;
         }
 
