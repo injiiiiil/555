@@ -131,9 +131,6 @@ void AC_Autorotation::init_entry(void)
 {
     gcs().send_text(MAV_SEVERITY_INFO, "Entry Phase");
 
-    // Set desired forward speed target
-    _fwd_spd_desired = _param_target_speed.get();
-
     // Target head speed is set to rpm at initiation to prevent steps in controller
     if (!get_norm_head_speed(_target_head_speed)) {
         // Cannot get a valid RPM sensor reading so we default to not slewing the head speed target
@@ -181,9 +178,6 @@ void AC_Autorotation::init_glide(void)
 
     // Ensure target head speed is set to setpoint, in case it didn't reach the target during entry
     _target_head_speed = HEAD_SPEED_TARGET_RATIO;
-
-    // Ensure desired forward speed target is set to param value
-    _fwd_spd_desired = _param_target_speed.get();
 }
 
 // Maintain head speed and forward speed as we glide to the ground
@@ -192,7 +186,7 @@ void AC_Autorotation::run_glide(float pilot_norm_input)
     update_headspeed_controller();
 
     // Set body frame velocity targets
-    _desired_velocity_bf.x = _fwd_spd_desired;
+    _desired_velocity_bf.x = _param_target_speed.get();
     _desired_velocity_bf.y = 0.0; // Always want zero side slip
 
     // Set body frame accel targets. Pilot requests lateral accel and we do use forward accel feed-forward
@@ -201,7 +195,7 @@ void AC_Autorotation::run_glide(float pilot_norm_input)
 
     // Based on the requested lateral accel, calc the necessary yaw rate to achieve a coordinated turn
     const float curr_fwd_speed = get_speed_forward();
-    const float delta_v = MIN((_fwd_spd_desired - curr_fwd_speed), (_param_accel_max.get() * _dt));
+    const float delta_v = MIN((_param_target_speed.get() - curr_fwd_speed), (_param_accel_max.get() * _dt));
     const float projected_vel = curr_fwd_speed + delta_v; // predicted velocity in the next time step
 
     // Calc yaw rate from desired body-frame accels
@@ -345,21 +339,18 @@ void AC_Autorotation::log_write_autorotation(void) const
     // @Field: P: P-term for head speed controller response
     // @Field: hserr: head speed error; difference between current and desired head speed
     // @Field: FFCol: FF-term for head speed controller response
-    // @Field: SpdF: current forward speed
     // @Field: LR: Landed Reason state flags
     // @FieldBitmaskEnum: LR: AC_Autorotation::AC_Autorotation_Landed_Reason
 
     //Write to data flash log
     AP::logger().WriteStreaming("AROT",
-                       "TimeUS,P,hserr,FFCol,SpdF,LR",
-                        "QffffB",
+                       "TimeUS,P,hserr,FFCol,LR",
+                        "QfffB",
                         AP_HAL::micros64(),
                         _p_term_hs,
                         _head_speed_error,
                         _ff_term_hs,
-                        get_speed_forward(),
                         _landed_reason);
-
 
     // @LoggerMessage: ARO2
     // @Vehicles: Copter
